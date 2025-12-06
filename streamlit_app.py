@@ -13,6 +13,7 @@ from collections import Counter
 
 import streamlit as st
 import pandas as pd
+import calendar as pycal
 
 from csv_parser import read_ib_flights_from_csv_bytes, extract_route_from_subject
 from calendar_builder import build_calendar_lines, hhmm_to_tuple
@@ -53,6 +54,58 @@ def _to_min(hhmm: str) -> int:
     """Convert HH:MM to minutes."""
     h, m = hhmm_to_tuple(hhmm)
     return h * 60 + m
+
+
+def _render_calendar_and_map(by_day: Dict[int, List[str]], route_counts_month: Dict[Tuple[str, str], int], year: int, month: int) -> None:
+    """Render a simple month calendar (buttons) below the map and filter routes by selected day.
+
+    - Days with flights are shown with a green square, otherwise red.
+    - Clicking a day filters the map to only routes for that day.
+    """
+    # Initialize selected_day in session state
+    key = f"selected_day_{year}_{month}"
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+    st.markdown("---")
+    st.subheader("Calendario del mes (clic en un día para filtrar rutas)")
+
+    weeks = pycal.Calendar(firstweekday=0).monthdayscalendar(year, month)
+    cols = None
+    for week in weeks:
+        cols = st.columns(7)
+        for i, day in enumerate(week):
+            if day == 0:
+                cols[i].write("")
+                continue
+            has = day in (by_day or {})
+            emoji = "🟩" if has else "🟥"
+            label = f"{day} {emoji}"
+            if cols[i].button(label, key=f"day_{year}_{month}_{day}"):
+                # toggle selection
+                if st.session_state.get(key) == day:
+                    st.session_state[key] = None
+                else:
+                    st.session_state[key] = day
+
+    sel = st.session_state.get(key)
+    if sel:
+        st.info(f"Mostrando rutas para el día {sel}")
+        # compute route counts for selected day
+        rc: Dict[Tuple[str, str], int] = {}
+        import re
+        regex_full = re.compile(r"\b([A-Z]{3})\s*-\s*([A-Z]{3})\b")
+        lines = by_day.get(int(sel), []) if by_day else []
+        for line in lines:
+            m = regex_full.search(line)
+            if m:
+                r = (m.group(1), m.group(2))
+                rc[r] = rc.get(r, 0) + 1
+        render_routes_map(rc, AIRPORTS_JSON)
+    else:
+        st.info("Mostrando rutas de todo el mes")
+        render_routes_map(route_counts_month or {}, AIRPORTS_JSON)
+
 
 
 def _parse_stats_from_by_day(by_day_any: Dict[Union[int, str], List[str]]):
@@ -206,7 +259,7 @@ def _try_load_firestore_stats(stats_user_id: str, stats_year: int, stats_month: 
 
 def main() -> None:
     st.set_page_config(page_title="Calendario de vuelos", layout="wide")
-    st.title("Programaciones de vuelo")
+    st.title("Programaciones de welo")
     st.caption("Selecciona el mes del que quieres ver la progra.")
 
     # === Visualization section ===
@@ -325,7 +378,8 @@ def main() -> None:
                 st.bar_chart(df_top.set_index("Destino"))
 
             st.subheader("Mapa de rutas del mes")
-            render_routes_map(route_counts_s, AIRPORTS_JSON)
+            # Render calendar + map with per-day filtering
+            _render_calendar_and_map(by_day_local, route_counts_s if isinstance(route_counts_s, dict) else {}, int(stats_year), int(stats_month))
 
         firestore_loaded = True
 
@@ -406,7 +460,8 @@ def main() -> None:
             st.bar_chart(df_top.set_index("Destino"))
 
         st.subheader("Mapa de rutas del mes")
-        render_routes_map(route_counts, AIRPORTS_JSON)
+        # Render calendar + map with per-day filtering for uploaded CSV
+        _render_calendar_and_map(by_day, route_counts, int(year), int(month))
 
         # === Firestore save (optional) ===
         if save_to_firestore and user_id.strip() and uploaded is not None:
