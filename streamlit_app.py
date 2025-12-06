@@ -467,6 +467,49 @@ def draw_month_calendar_pdf_bytes(
     return buf.getvalue()
 
 
+# -------- Map rendering ---------
+
+def _render_routes_map(route_set: set[Tuple[str, str]]) -> None:
+    """Renderiza un mapa de rutas usando pydeck. Si no hay rutas o coordenadas, muestra un mensaje."""
+    coords_map = load_airport_coords(AIRPORTS_JSON)
+    arc_data = []
+    center_lat, center_lon, n_cent = 40.0, -3.7, 0  # centrado aprox. España por defecto
+    for (orig, dest) in sorted(route_set):
+        if orig in coords_map and dest in coords_map:
+            o_lat, o_lon = coords_map[orig]
+            d_lat, d_lon = coords_map[dest]
+            arc_data.append({
+                "from_code": orig,
+                "to_code": dest,
+                "from_lat": o_lat,
+                "from_lon": o_lon,
+                "to_lat": d_lat,
+                "to_lon": d_lon,
+            })
+            center_lat += (o_lat + d_lat)
+            center_lon += (o_lon + d_lon)
+            n_cent += 2
+    if n_cent:
+        center_lat /= (n_cent + 1)
+        center_lon /= (n_cent + 1)
+
+    if arc_data:
+        layer = pdk.Layer(
+            "ArcLayer",
+            arc_data,
+            get_source_position="[from_lon, from_lat]",
+            get_target_position="[to_lon, to_lat]",
+            get_source_color=[255, 0, 0, 160],
+            get_target_color=[0, 102, 204, 160],
+            get_width=2,
+            pickable=True,
+        )
+        view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=3.5)
+        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{from_code} → {to_code}"}))
+    else:
+        st.info("No hay rutas con coordenadas disponibles para mostrar el mapa.")
+
+
 # -------- Streamlit UI ---------
 
 def main() -> None:
@@ -756,43 +799,8 @@ def main() -> None:
                         df_top = pd.DataFrame(filtered, columns=["Destino", "Vuelos"]) if filtered else pd.DataFrame(columns=["Destino", "Vuelos"])
                         st.bar_chart(df_top.set_index("Destino"))
 
-                    coords_map = load_airport_coords(AIRPORTS_JSON)
-                    arc_data = []
-                    center_lat, center_lon, n_cent = 40.0, -3.7, 0
-                    for (orig, dest) in sorted(route_set_s):
-                        if orig in coords_map and dest in coords_map:
-                            o_lat, o_lon = coords_map[orig]
-                            d_lat, d_lon = coords_map[dest]
-                            arc_data.append({
-                                "from_code": orig,
-                                "to_code": dest,
-                                "from_lat": o_lat,
-                                "from_lon": o_lon,
-                                "to_lat": d_lat,
-                                "to_lon": d_lon,
-                            })
-                            center_lat += (o_lat + d_lat)
-                            center_lon += (o_lon + d_lon)
-                            n_cent += 2
-                    if n_cent:
-                        center_lat /= (n_cent + 1)
-                        center_lon /= (n_cent + 1)
-
-                    if arc_data:
-                        layer = pdk.Layer(
-                            "ArcLayer",
-                            arc_data,
-                            get_source_position="[from_lon, from_lat]",
-                            get_target_position="[to_lon, to_lat]",
-                            get_source_color=[255, 0, 0, 160],
-                            get_target_color=[0, 102, 204, 160],
-                            get_width=2,
-                            pickable=True,
-                        )
-                        view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=3.5)
-                        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{from_code} → {to_code}"}))
-                    else:
-                        st.info("No hay rutas con coordenadas disponibles para mostrar el mapa.")
+                    st.subheader("Mapa de rutas del mes")
+                    _render_routes_map(route_set_s)
 
                 stats_loaded = True
             else:
@@ -846,6 +854,50 @@ def main() -> None:
             file_name=f"calendar_{year}_{month:02d}.pdf",
             mime="application/pdf",
         )
+
+        # --- Estadísticas básicas (del CSV subido) ---
+        # Filtrar filas del mes/año actual
+        month_rows = [r for r in rows if r.start_date.year == year and r.start_date.month == month]
+        dest_counter = Counter()
+        route_set = set()
+        for r in month_rows:
+            parts = _extract_route_from_subject(r.subject)
+            if not parts:
+                continue
+            dest_counter[parts.dest] += 1
+            route_set.add((parts.origin, parts.dest))
+
+        # Calcular horas totales de vuelo del mes (considerando medianoche)
+        def _to_min(hhmm: str) -> int:
+            h, m = _hhmm_to_tuple(hhmm)
+            return h * 60 + m
+        total_min_csv = 0
+        for r in month_rows:
+            s = _to_min(r.start_time)
+            e = _to_min(r.end_time)
+            if r.end_date == r.start_date:
+                total_min_csv += max(0, e - s)
+            else:
+                total_min_csv += (24 * 60 - s) + e
+        th, tm = divmod(total_min_csv, 60)
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Vuelos (legs)", f"{len(month_rows)}")
+        col2.metric("Días con vuelo", f"{len(by_day)}")
+        col3.metric("Destinos únicos", f"{len(set(dest_counter.keys()))}")
+        col4.metric("Horas de vuelo", f"{th} h {tm:02d} m")
+
+        if dest_counter:
+            st.subheader("Top destinos del mes")
+            import pandas as pd
+            # Excluir MAD del ranking para centrarlo en destinos fuera de base
+            filtered = [(d, c) for d, c in dest_counter.most_common() if d != "MAD"][:10]
+            df_top = pd.DataFrame(filtered, columns=["Destino", "Vuelos"]) if filtered else pd.DataFrame(columns=["Destino", "Vuelos"])
+            st.bar_chart(df_top.set_index("Destino"))
+
+        # --- Mapa de rutas ---
+        st.subheader("Mapa de rutas del mes")
+        _render_routes_map(route_set)
 
         # Guardado mínimo en Firestore (solo identificación y by_day)
         if save_to_firestore and user_id.strip() and uploaded is not None:
@@ -911,87 +963,6 @@ def main() -> None:
                     st.success(f"Guardado en Firestore: {doc_id}")
             except Exception as e:
                 st.error(f"No se pudo guardar en Firestore: {e}")
-
-            # --- Estadísticas básicas (del CSV subido) ---
-            # Filtrar filas del mes/año actual
-            month_rows = [r for r in rows if r.start_date.year == year and r.start_date.month == month]
-            dest_counter = Counter()
-            route_set = set()
-            for r in month_rows:
-                parts = _extract_route_from_subject(r.subject)
-                if not parts:
-                    continue
-                dest_counter[parts.dest] += 1
-                route_set.add((parts.origin, parts.dest))
-
-            # Calcular horas totales de vuelo del mes (considerando medianoche)
-            def _to_min(hhmm: str) -> int:
-                h, m = _hhmm_to_tuple(hhmm)
-                return h * 60 + m
-            total_min_csv = 0
-            for r in month_rows:
-                s = _to_min(r.start_time)
-                e = _to_min(r.end_time)
-                if r.end_date == r.start_date:
-                    total_min_csv += max(0, e - s)
-                else:
-                    total_min_csv += (24 * 60 - s) + e
-            th, tm = divmod(total_min_csv, 60)
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Vuelos (legs)", f"{len(month_rows)}")
-            col2.metric("Días con vuelo", f"{len(by_day)}")
-            col3.metric("Destinos únicos", f"{len(set(dest_counter.keys()))}")
-            col4.metric("Horas de vuelo", f"{th} h {tm:02d} m")
-
-            if dest_counter:
-                st.subheader("Top destinos del mes")
-                import pandas as pd
-                # Excluir MAD del ranking para centrarlo en destinos fuera de base
-                filtered = [(d, c) for d, c in dest_counter.most_common() if d != "MAD"][:10]
-                df_top = pd.DataFrame(filtered, columns=["Destino", "Vuelos"]) if filtered else pd.DataFrame(columns=["Destino", "Vuelos"])
-                st.bar_chart(df_top.set_index("Destino"))
-
-            # --- Mapa de rutas ---
-            st.subheader("Mapa de rutas del mes")
-            coords_map = load_airport_coords(AIRPORTS_JSON)
-            arc_data = []
-            center_lat, center_lon, n_cent = 40.0, -3.7, 0  # centrado aprox. España por defecto
-            for (orig, dest) in sorted(route_set):
-                if orig in coords_map and dest in coords_map:
-                    o_lat, o_lon = coords_map[orig]
-                    d_lat, d_lon = coords_map[dest]
-                    arc_data.append({
-                        "from_code": orig,
-                        "to_code": dest,
-                        "from_lat": o_lat,
-                        "from_lon": o_lon,
-                        "to_lat": d_lat,
-                        "to_lon": d_lon,
-                    })
-                    # media simple para viewport
-                    center_lat += (o_lat + d_lat)
-                    center_lon += (o_lon + d_lon)
-                    n_cent += 2
-            if n_cent:
-                center_lat /= (n_cent + 1)
-                center_lon /= (n_cent + 1)
-
-            if arc_data:
-                layer = pdk.Layer(
-                    "ArcLayer",
-                    arc_data,
-                    get_source_position="[from_lon, from_lat]",
-                    get_target_position="[to_lon, to_lat]",
-                    get_source_color=[255, 0, 0, 160],
-                    get_target_color=[0, 102, 204, 160],
-                    get_width=2,
-                    pickable=True,
-                )
-                view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=3.5)
-                st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{from_code} → {to_code}"}))
-            else:
-                st.info("No hay rutas con coordenadas disponibles para mostrar el mapa.")
 
     st.markdown("---")
     st.caption("Tus archivos no se almacenan; el PDF se genera bajo demanda y se descarga. Si activas Firestore, solo se guarda identificación y by_day.")
